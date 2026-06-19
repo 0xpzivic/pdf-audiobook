@@ -22,11 +22,13 @@ const state = {
   rate: 1.0,
   voiceName: null,
   voices: [],        // available en voices
-  voiceOptions: [],  // the 2 chosen voices
+  voiceOptions: [],  // the chosen voices (up to 3)
   fileName: null,
   numPages: 0,
   isPlaying: false,
-  isLoadingVoices: false,
+  audioKeepAlive: null, // AudioContext for lock-screen keep-alive
+  sleepTimer: null,     // setTimeout id for sleep timer
+  sleepTimerEnd: null,  // timestamp when timer fires
 };
 
 // ----- DOM refs -----
@@ -38,9 +40,7 @@ const uploadStatus = $("upload-status");
 
 const bookTitleEl = $("book-title");
 const bookMetaEl = $("book-meta");
-const prevTextEl = $("prev-text");
-const curTextEl = $("cur-text");
-const nextTextEl = $("next-text");
+const readingView = $("reading-view");
 const scrubber = $("scrubber");
 const posLabel = $("pos-label");
 const pageLabel = $("page-label");
@@ -56,6 +56,10 @@ const voiceBtn = $("voice-btn");
 const voiceName = $("voice-name");
 const backBtn = $("back-btn");
 const removeBtn = $("remove-btn");
+const timerBtn = $("timer-btn");
+const timerLabel = $("timer-label");
+const timerPopup = $("timer-popup");
+const timerClose = $("timer-close");
 
 /* ============================================================
    IndexedDB helpers
@@ -214,19 +218,25 @@ async function pdfToSegments(arrayBuffer) {
 function refreshVoices() {
   const all = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
   state.voices = all.filter((v) => /^en/i.test(v.lang));
-  // Pick preferred voices: Samantha (female) + Alex (male).
+  // Pick preferred voices in order of naturalness:
+  // 1. Samantha (female, very natural)
+  // 2. Alex (male, natural)
+  // 3. Ava (iOS 17+ enhanced natural female) — falls back to Daniel, then Karen
   const find = (name) => state.voices.find((v) => v.name.toLowerCase() === name.toLowerCase());
   const preferred = [];
   const sam = find("Samantha");
   if (sam) preferred.push(sam);
   const alex = find("Alex");
   if (alex) preferred.push(alex);
-  // Fill up to 2 with any other en voices.
+  // Third voice: try Ava (premium), then Daniel (British male), then Karen (Australian female)
+  const third = find("Ava") || find("Daniel") || find("Karen") || find("Tom") || find("Zoe");
+  if (third) preferred.push(third);
+  // Fill up to 3 with any other en voices if we couldn't find preferred ones.
   for (const v of state.voices) {
-    if (preferred.length >= 2) break;
+    if (preferred.length >= 3) break;
     if (!preferred.includes(v)) preferred.push(v);
   }
-  state.voiceOptions = preferred.slice(0, 2);
+  state.voiceOptions = preferred.slice(0, 3);
   // Validate current voiceName still exists.
   if (state.voiceName && !all.some((v) => v.name === state.voiceName)) {
     state.voiceName = state.voiceOptions[0] ? state.voiceOptions[0].name : null;
@@ -247,6 +257,11 @@ function speakSegment(index) {
     stopPlayback();
     return;
   }
+  // Save position BEFORE speaking so if iOS kills the app mid-sentence,
+  // we resume at this sentence (re-reading it) rather than skipping it.
+  state.segIndex = index;
+  saveAppState();
+  renderPosition();
   const seg = state.segments[index];
   const u = new SpeechSynthesisUtterance(seg.text);
   const v = currentVoice();
@@ -266,6 +281,7 @@ function speakSegment(index) {
       state.isPlaying = false;
       renderPlayButton();
       renderPosition();
+      stopAudioKeepAlive();
     }
   };
   u.onerror = () => {
@@ -278,6 +294,7 @@ function speakSegment(index) {
     } else {
       state.isPlaying = false;
       renderPlayButton();
+      stopAudioKeepAlive();
     }
   };
   window.speechSynthesis.speak(u);
@@ -292,10 +309,12 @@ function play() {
     window.speechSynthesis.resume();
     state.isPlaying = true;
     renderPlayButton();
+    startAudioKeepAlive();
     return;
   }
   state.isPlaying = true;
   renderPlayButton();
+  startAudioKeepAlive();
   speakSegment(state.segIndex);
 }
 
@@ -305,12 +324,65 @@ function pause() {
   try { window.speechSynthesis.pause(); } catch (e) {}
   renderPlayButton();
   saveAppState();
+  stopAudioKeepAlive();
 }
 
 function stopPlayback() {
   state.isPlaying = false;
   try { window.speechSynthesis.cancel(); } catch (e) {}
   renderPlayButton();
+  stopAudioKeepAlive();
+}
+
+/* ============================================================
+   Audio keep-alive for lock-screen / background playback.
+   iOS suspends SpeechSynthesis when the app is backgrounded.
+   Playing a silent audio loop keeps the audio session alive,
+   which can help TTS continue on some iOS versions.
+   This is a best-effort hack — iOS may still stop TTS on lock.
+   ============================================================ */
+function startAudioKeepAlive() {
+  if (state.audioKeepAlive) return;
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    // Create a near-silent oscillator to keep the audio session active.
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    gain.gain.value = 0.0001; // effectively silent
+    osc.frequency.value = 1;
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    state.audioKeepAlive = ctx;
+    // Set up Media Session so lock screen shows playback controls.
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: state.fileName ? state.fileName.replace(/\.pdf$/i, "") : "Audiobook",
+        artist: "PDF Audiobook",
+        album: "PDF Audiobook",
+      });
+      navigator.mediaSession.setActionHandler("play", () => play());
+      navigator.mediaSession.setActionHandler("pause", () => pause());
+      navigator.mediaSession.setActionHandler("previoustrack", () => jump(-1));
+      navigator.mediaSession.setActionHandler("nexttrack", () => jump(1));
+      navigator.mediaSession.playbackState = "playing";
+    }
+  } catch (e) {
+    console.warn("Audio keep-alive failed:", e);
+  }
+}
+
+function stopAudioKeepAlive() {
+  if (!state.audioKeepAlive) return;
+  try {
+    state.audioKeepAlive.close();
+  } catch (e) {}
+  state.audioKeepAlive = null;
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.playbackState = "paused";
+  }
 }
 
 function jump(delta) {
@@ -325,6 +397,7 @@ function jump(delta) {
     renderPlayButton();
     speakSegment(state.segIndex);
   }
+  updateMediaSession();
 }
 
 function scrubTo(index) {
@@ -339,6 +412,72 @@ function scrubTo(index) {
     renderPlayButton();
     speakSegment(state.segIndex);
   }
+  updateMediaSession();
+}
+
+function updateMediaSession() {
+  if ("mediaSession" in navigator && state.isPlaying) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: state.fileName ? state.fileName.replace(/\.pdf$/i, "") : "Audiobook",
+      artist: "PDF Audiobook",
+      album: "PDF Audiobook",
+    });
+  }
+}
+
+/* ============================================================
+   Sleep timer
+   ============================================================ */
+function setSleepTimer(minutes) {
+  clearSleepTimer();
+  if (minutes <= 0) {
+    renderTimerLabel();
+    return;
+  }
+  state.sleepTimerEnd = Date.now() + minutes * 60 * 1000;
+  state.sleepTimer = setTimeout(() => {
+    stopPlayback();
+    clearSleepTimer();
+  }, minutes * 60 * 1000);
+  renderTimerLabel();
+}
+
+function clearSleepTimer() {
+  if (state.sleepTimer) {
+    clearTimeout(state.sleepTimer);
+    state.sleepTimer = null;
+  }
+  state.sleepTimerEnd = null;
+  renderTimerLabel();
+}
+
+function renderTimerLabel() {
+  if (!state.sleepTimerEnd) {
+    timerLabel.textContent = "Sleep timer";
+    timerLabel.classList.remove("active");
+    return;
+  }
+  const remaining = Math.max(0, state.sleepTimerEnd - Date.now());
+  const mins = Math.floor(remaining / 60000);
+  const secs = Math.floor((remaining % 60000) / 1000);
+  timerLabel.textContent = `⏱ ${mins}:${secs.toString().padStart(2, "0")}`;
+  timerLabel.classList.add("active");
+}
+
+function openTimerPopup() {
+  timerPopup.classList.remove("hidden");
+  // Highlight active option
+  const opts = timerPopup.querySelectorAll(".timer-opt");
+  opts.forEach((o) => o.classList.remove("active"));
+  if (state.sleepTimerEnd) {
+    // No specific highlight since we use custom durations; just leave none active
+  } else {
+    opts[0].classList.add("active"); // "Off"
+  }
+}
+
+function closeTimerPopup() {
+  timerPopup.classList.add("hidden");
 }
 
 /* ============================================================
@@ -361,17 +500,39 @@ function renderPosition() {
   scrubber.value = Math.min(i, Math.max(0, n - 1));
   posLabel.textContent = `${Math.min(i + 1, n)} / ${n}`;
   const cur = state.segments[i];
-  if (cur) {
-    curTextEl.textContent = cur.text;
-    pageLabel.textContent = `Page ${cur.page}`;
-  } else {
-    curTextEl.textContent = "—";
-    pageLabel.textContent = "";
+  pageLabel.textContent = cur ? `Page ${cur.page}` : "";
+
+  // Build a flowing text view: show sentences around the current one,
+  // with the current sentence highlighted. Page breaks are shown as markers.
+  const CONTEXT = 4; // sentences before/after to show
+  const start = Math.max(0, i - CONTEXT);
+  const end = Math.min(n, i + CONTEXT + 1);
+  let html = "";
+  let lastPage = null;
+  for (let j = start; j < end; j++) {
+    const seg = state.segments[j];
+    if (!seg) continue;
+    // Show page break marker when crossing into a new page.
+    if (seg.page !== lastPage && lastPage !== null) {
+      html += `<span class="page-break">— Page ${seg.page} —</span> `;
+    }
+    lastPage = seg.page;
+    let cls = "sent ";
+    if (j < i) cls += "past";
+    else if (j === i) cls += "current";
+    else cls += "upcoming";
+    html += `<span class="${cls}" data-idx="${j}">${escapeHtml(seg.text)} </span>`;
   }
-  prevTextEl.textContent = state.segments[i - 1] ? state.segments[i - 1].text : "";
-  nextTextEl.textContent = state.segments[i + 1] ? state.segments[i + 1].text : "";
-  // Keep current sentence in view.
-  curTextEl.scrollIntoView({ block: "center", behavior: "smooth" });
+  readingView.innerHTML = html;
+  // Scroll the current sentence into view.
+  const curEl = readingView.querySelector(".sent.current");
+  if (curEl) curEl.scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
 }
 
 function renderPlayButton() {
@@ -534,13 +695,18 @@ function wireEvents() {
   });
   removeBtn.addEventListener("click", removeBook);
 
-  // Persist position when the app is hidden or closed (iOS pauses/cuts TTS).
+  // Persist position when the app is hidden or closed.
+  // On iOS, the audio keep-alive may let TTS continue in background.
+  // We save state aggressively so position is never lost.
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") {
-      if (state.isPlaying) {
+      saveAppState();
+    } else if (document.visibilityState === "visible") {
+      // If we were playing and iOS killed TTS while hidden, update UI.
+      if (state.isPlaying && window.speechSynthesis && !window.speechSynthesis.speaking) {
         state.isPlaying = false;
-        try { window.speechSynthesis.pause(); } catch (e) {}
         renderPlayButton();
+        stopAudioKeepAlive();
       }
       saveAppState();
     }

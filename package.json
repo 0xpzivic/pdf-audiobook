@@ -1,0 +1,16 @@
+{
+  "name": "read_out_loud",
+  "version": "1.0.0",
+  "description": "A tiny, offline-first **PWA** that reads PDF books out loud. Built for personal use on an iPhone 14.",
+  "main": "app.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "playwright": "^1.61.0"
+  }
+}
