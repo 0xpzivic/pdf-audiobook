@@ -695,6 +695,25 @@ function wireEvents() {
   });
   removeBtn.addEventListener("click", removeBook);
 
+  // Sleep timer
+  timerBtn.addEventListener("click", openTimerPopup);
+  timerClose.addEventListener("click", closeTimerPopup);
+  timerPopup.addEventListener("click", (e) => {
+    if (e.target === timerPopup) closeTimerPopup();
+  });
+  timerPopup.querySelectorAll(".timer-opt").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const mins = parseInt(btn.dataset.min, 10);
+      setSleepTimer(mins);
+      closeTimerPopup();
+    });
+  });
+
+  // Update timer label every second while active
+  setInterval(() => {
+    if (state.sleepTimerEnd) renderTimerLabel();
+  }, 1000);
+
   // Persist position when the app is hidden or closed.
   // On iOS, the audio keep-alive may let TTS continue in background.
   // We save state aggressively so position is never lost.
