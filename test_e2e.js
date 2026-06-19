@@ -153,7 +153,30 @@ const MOCK_TTS = `
     throw new Error(`FAIL: position not restored (${idxBeforeReload} -> ${idxAfterReload})`);
   console.log("PASS: position restored after reload:", idxAfterReload);
 
-  // 11. No console errors
+  // 11. Sleep timer popup opens and closes
+  await page.click("#timer-btn");
+  await page.waitForTimeout(100);
+  const popupVisible = await page.evaluate(() => !document.getElementById("timer-popup").classList.contains("hidden"));
+  if (!popupVisible) throw new Error("FAIL: timer popup did not open");
+  console.log("PASS: sleep timer popup opens");
+
+  // 12. Set a sleep timer (5 min) -> label updates
+  await page.click('.timer-opt[data-min="5"]');
+  await page.waitForTimeout(100);
+  const timerLabel = await page.textContent("#timer-label");
+  if (!timerLabel.includes("⏱")) throw new Error("FAIL: timer label not showing countdown, got: " + timerLabel);
+  console.log("PASS: sleep timer set, label:", timerLabel);
+
+  // 13. Turn off sleep timer
+  await page.click("#timer-btn");
+  await page.waitForTimeout(100);
+  await page.click('.timer-opt[data-min="0"]');
+  await page.waitForTimeout(100);
+  const timerLabelOff = await page.textContent("#timer-label");
+  if (timerLabelOff !== "Sleep timer") throw new Error("FAIL: timer not turned off, got: " + timerLabelOff);
+  console.log("PASS: sleep timer turned off");
+
+  // 14. No console errors
   if (errors.length) {
     console.log("FAIL: console errors:\n" + errors.join("\n"));
     process.exit(1);
