@@ -30,6 +30,8 @@ const state = {
   sleepTimer: null,        // setTimeout id for sleep timer
   sleepTimerEnd: null,     // timestamp when timer fires
   sleepTimerDuration: null, // minutes currently set
+  useBackgroundTts: false, // true = speak.js audio (background/lock-screen), false = Web Speech
+  speakGeneratorLoaded: false, // speakGenerator.js loaded flag
 };
 
 // ----- DOM refs -----
@@ -61,6 +63,9 @@ const timerBtn = $("timer-btn");
 const timerLabel = $("timer-label");
 const timerPopup = $("timer-popup");
 const timerClose = $("timer-close");
+const modeBtn = $("mode-btn");
+const modeLabel = $("mode-label");
+const bgAudio = $("bg-audio");
 
 /* ============================================================
    IndexedDB helpers
@@ -130,6 +135,7 @@ function saveAppState() {
     segIndex: state.segIndex,
     rate: state.rate,
     voiceName: state.voiceName,
+    useBackgroundTts: state.useBackgroundTts,
     savedAt: Date.now(),
   });
 }
@@ -253,11 +259,15 @@ function currentVoice() {
 }
 
 function speakSegment(index) {
-  if (!window.speechSynthesis) return;
   if (index < 0 || index >= state.segments.length) {
     stopPlayback();
     return;
   }
+  if (state.useBackgroundTts) {
+    speakSegmentBackground(index);
+    return;
+  }
+  if (!window.speechSynthesis) return;
   // Save position BEFORE speaking so if iOS kills the app mid-sentence,
   // we resume at this sentence (re-reading it) rather than skipping it.
   state.segIndex = index;
@@ -301,12 +311,91 @@ function speakSegment(index) {
   window.speechSynthesis.speak(u);
 }
 
+function speakSegmentBackground(index) {
+  if (index < 0 || index >= state.segments.length) {
+    stopPlayback();
+    return;
+  }
+  state.segIndex = index;
+  saveAppState();
+  renderPosition();
+
+  loadSpeakGenerator()
+    .then(() => {
+      const text = state.segments[index].text;
+      // speak.js default speed is 175 wpm. Map our rate (0.5..2.0) to a similar range.
+      const speed = Math.max(80, Math.round(175 * state.rate));
+      const wav = window.generateSpeech(text, { speed, pitch: 50, amplitude: 100, wordgap: 0 });
+      if (!wav || wav.length === 0) {
+        throw new Error("No audio generated");
+      }
+      const blob = new Blob([wav], { type: "audio/wav" });
+      const url = URL.createObjectURL(blob);
+
+      bgAudio.src = url;
+      bgAudio.load();
+      bgAudio.onended = () => {
+        URL.revokeObjectURL(url);
+        if (!state.isPlaying) return;
+        state.segIndex = index + 1;
+        saveAppState();
+        if (state.segIndex < state.segments.length) {
+          renderPosition();
+          speakSegmentBackground(state.segIndex);
+        } else {
+          state.isPlaying = false;
+          renderPlayButton();
+          stopAudioKeepAlive();
+        }
+      };
+      bgAudio.onerror = () => {
+        URL.revokeObjectURL(url);
+        if (!state.isPlaying) return;
+        state.segIndex = index + 1;
+        saveAppState();
+        if (state.segIndex < state.segments.length) {
+          renderPosition();
+          speakSegmentBackground(state.segIndex);
+        } else {
+          state.isPlaying = false;
+          renderPlayButton();
+          stopAudioKeepAlive();
+        }
+      };
+      return bgAudio.play();
+    })
+    .catch((err) => {
+      console.error("Background TTS failed:", err);
+      // Fall back to natural voice and keep playing.
+      state.useBackgroundTts = false;
+      saveAppState();
+      renderMode();
+      if (state.isPlaying) speakSegment(index);
+    });
+}
+
+function loadSpeakGenerator() {
+  if (state.speakGeneratorLoaded || window.generateSpeech) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "speakGenerator.js";
+    s.onload = () => {
+      state.speakGeneratorLoaded = true;
+      resolve();
+    };
+    s.onerror = () => reject(new Error("Could not load speakGenerator.js"));
+    document.head.appendChild(s);
+  });
+}
+
 function play() {
   if (state.segments.length === 0) return;
   // Resume from end -> restart at beginning.
   if (state.segIndex >= state.segments.length) state.segIndex = 0;
   // If paused mid-utterance, resume.
-  if (window.speechSynthesis.paused) {
+  if (window.speechSynthesis.paused && !state.useBackgroundTts) {
     window.speechSynthesis.resume();
     state.isPlaying = true;
     renderPlayButton();
@@ -320,9 +409,14 @@ function play() {
 }
 
 function pause() {
-  if (!window.speechSynthesis) return;
   state.isPlaying = false;
-  try { window.speechSynthesis.pause(); } catch (e) {}
+  if (state.useBackgroundTts) {
+    try { bgAudio.pause(); } catch (e) {}
+  } else {
+    if (window.speechSynthesis) {
+      try { window.speechSynthesis.pause(); } catch (e) {}
+    }
+  }
   renderPlayButton();
   saveAppState();
   stopAudioKeepAlive();
@@ -330,7 +424,13 @@ function pause() {
 
 function stopPlayback() {
   state.isPlaying = false;
-  try { window.speechSynthesis.cancel(); } catch (e) {}
+  if (state.useBackgroundTts) {
+    try { bgAudio.pause(); bgAudio.src = ""; } catch (e) {}
+  } else {
+    if (window.speechSynthesis) {
+      try { window.speechSynthesis.cancel(); } catch (e) {}
+    }
+  }
   renderPlayButton();
   stopAudioKeepAlive();
 }
@@ -386,9 +486,19 @@ function stopAudioKeepAlive() {
   }
 }
 
+function stopCurrentPlayback() {
+  if (state.useBackgroundTts) {
+    try { bgAudio.pause(); bgAudio.src = ""; } catch (e) {}
+  } else {
+    if (window.speechSynthesis) {
+      try { window.speechSynthesis.cancel(); } catch (e) {}
+    }
+  }
+}
+
 function jump(delta) {
   const wasPlaying = state.isPlaying;
-  try { window.speechSynthesis.cancel(); } catch (e) {}
+  stopCurrentPlayback();
   state.isPlaying = false;
   state.segIndex = Math.max(0, Math.min(state.segments.length - 1, state.segIndex + delta));
   saveAppState();
@@ -403,7 +513,7 @@ function jump(delta) {
 
 function scrubTo(index) {
   const wasPlaying = state.isPlaying;
-  try { window.speechSynthesis.cancel(); } catch (e) {}
+  stopCurrentPlayback();
   state.isPlaying = false;
   state.segIndex = Math.max(0, Math.min(state.segments.length - 1, index));
   saveAppState();
@@ -635,6 +745,7 @@ async function restoreBook() {
     state.segIndex = saved.segIndex || 0;
     state.rate = saved.rate || 1.0;
     state.voiceName = saved.voiceName || null;
+    state.useBackgroundTts = saved.useBackgroundTts || false;
   }
   if (book && book.segments && book.segments.length) {
     state.segments = book.segments;
@@ -644,10 +755,28 @@ async function restoreBook() {
     renderPosition();
     renderRate();
     renderVoice();
+    renderMode();
     showPlayer();
     return true;
   }
+  renderMode();
   return false;
+}
+
+function renderMode() {
+  modeLabel.textContent = state.useBackgroundTts ? "Background voice" : "Natural voice";
+  if (state.useBackgroundTts) modeLabel.classList.add("background");
+  else modeLabel.classList.remove("background");
+}
+
+function toggleMode() {
+  if (state.isPlaying) {
+    // Stop current playback cleanly before switching.
+    stopPlayback();
+  }
+  state.useBackgroundTts = !state.useBackgroundTts;
+  saveAppState();
+  renderMode();
 }
 
 async function removeBook() {
@@ -748,6 +877,9 @@ function wireEvents() {
     }
   }, 1000);
 
+  // Background / natural mode toggle
+  modeBtn.addEventListener("click", toggleMode);
+
   // Persist position when the app is hidden or closed.
   // On iOS, the audio keep-alive may let TTS continue in background.
   // We save state aggressively so position is never lost.
@@ -755,11 +887,19 @@ function wireEvents() {
     if (document.visibilityState === "hidden") {
       saveAppState();
     } else if (document.visibilityState === "visible") {
-      // If we were playing and iOS killed TTS while hidden, update UI.
-      if (state.isPlaying && window.speechSynthesis && !window.speechSynthesis.speaking) {
-        state.isPlaying = false;
-        renderPlayButton();
-        stopAudioKeepAlive();
+      // If we were playing and audio/TTS stopped while hidden, update UI.
+      if (state.isPlaying) {
+        let stillSpeaking = false;
+        if (state.useBackgroundTts) {
+          stillSpeaking = bgAudio && !bgAudio.paused;
+        } else if (window.speechSynthesis) {
+          stillSpeaking = window.speechSynthesis.speaking;
+        }
+        if (!stillSpeaking) {
+          state.isPlaying = false;
+          renderPlayButton();
+          stopAudioKeepAlive();
+        }
       }
       saveAppState();
     }

@@ -226,3 +226,4 @@ body {
   border: 0; padding: 12px; font-size: 16px; cursor: pointer;
 }
 #timer-label.active { color: var(--accent-2); }
+#mode-label.background { color: var(--accent-2); }

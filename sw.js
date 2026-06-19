@@ -12,6 +12,8 @@ const SHELL = [
   "./icon-192.png",
   "./icon-512.png",
   "./apple-touch-icon.png",
+  "./speakGenerator.js",
+  "./speakWorker.js",
 ];
 
 self.addEventListener("install", (event) => {
