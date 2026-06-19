@@ -26,9 +26,10 @@ const state = {
   fileName: null,
   numPages: 0,
   isPlaying: false,
-  audioKeepAlive: null, // AudioContext for lock-screen keep-alive
-  sleepTimer: null,     // setTimeout id for sleep timer
-  sleepTimerEnd: null,  // timestamp when timer fires
+  audioKeepAlive: null,    // AudioContext for lock-screen keep-alive
+  sleepTimer: null,        // setTimeout id for sleep timer
+  sleepTimerEnd: null,     // timestamp when timer fires
+  sleepTimerDuration: null, // minutes currently set
 };
 
 // ----- DOM refs -----
@@ -435,8 +436,10 @@ function setSleepTimer(minutes) {
     return;
   }
   state.sleepTimerEnd = Date.now() + minutes * 60 * 1000;
+  state.sleepTimerDuration = minutes;
   state.sleepTimer = setTimeout(() => {
-    stopPlayback();
+    // Only stop if we are actually playing. If the user paused manually, just clear.
+    if (state.isPlaying) stopPlayback();
     clearSleepTimer();
   }, minutes * 60 * 1000);
   renderTimerLabel();
@@ -448,6 +451,7 @@ function clearSleepTimer() {
     state.sleepTimer = null;
   }
   state.sleepTimerEnd = null;
+  state.sleepTimerDuration = null;
   renderTimerLabel();
 }
 
@@ -466,13 +470,24 @@ function renderTimerLabel() {
 
 function openTimerPopup() {
   timerPopup.classList.remove("hidden");
-  // Highlight active option
   const opts = timerPopup.querySelectorAll(".timer-opt");
   opts.forEach((o) => o.classList.remove("active"));
-  if (state.sleepTimerEnd) {
-    // No specific highlight since we use custom durations; just leave none active
+  if (state.sleepTimerDuration) {
+    // Highlight the current duration.
+    const active = timerPopup.querySelector(`.timer-opt[data-min="${state.sleepTimerDuration}"]`);
+    if (active) active.classList.add("active");
   } else {
     opts[0].classList.add("active"); // "Off"
+  }
+  // Update the popup title with remaining time so the user knows the current state.
+  const title = timerPopup.querySelector(".popup-title");
+  if (state.sleepTimerEnd) {
+    const remaining = Math.max(0, state.sleepTimerEnd - Date.now());
+    const mins = Math.floor(remaining / 60000);
+    const secs = Math.floor((remaining % 60000) / 1000);
+    title.textContent = `Stops in ${mins}:${secs.toString().padStart(2, "0")}`;
+  } else {
+    title.textContent = "Stop reading in…";
   }
 }
 
@@ -498,13 +513,16 @@ function renderPosition() {
   const i = state.segIndex;
   scrubber.max = Math.max(0, n - 1);
   scrubber.value = Math.min(i, Math.max(0, n - 1));
+  // Show the filled portion of the scrubber track.
+  const pct = n > 1 ? ((i / (n - 1)) * 100) : 0;
+  scrubber.style.setProperty("--progress", pct + "%");
   posLabel.textContent = `${Math.min(i + 1, n)} / ${n}`;
   const cur = state.segments[i];
   pageLabel.textContent = cur ? `Page ${cur.page}` : "";
 
   // Build a flowing text view: show sentences around the current one,
   // with the current sentence highlighted. Page breaks are shown as markers.
-  const CONTEXT = 4; // sentences before/after to show
+  const CONTEXT = 5; // sentences before/after to show
   const start = Math.max(0, i - CONTEXT);
   const end = Math.min(n, i + CONTEXT + 1);
   let html = "";
@@ -524,9 +542,17 @@ function renderPosition() {
     html += `<span class="${cls}" data-idx="${j}">${escapeHtml(seg.text)} </span>`;
   }
   readingView.innerHTML = html;
-  // Scroll the current sentence into view.
+  // Scroll the current sentence into view only if it's not already visible.
   const curEl = readingView.querySelector(".sent.current");
-  if (curEl) curEl.scrollIntoView({ block: "center", behavior: "smooth" });
+  if (curEl && !isElementInViewport(curEl, readingView)) {
+    curEl.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+}
+
+function isElementInViewport(el, container) {
+  const rect = el.getBoundingClientRect();
+  const cRect = container.getBoundingClientRect();
+  return rect.top >= cRect.top && rect.bottom <= cRect.bottom;
 }
 
 function escapeHtml(text) {
@@ -557,8 +583,11 @@ function renderVoice() {
 
 function renderHeader() {
   bookTitleEl.textContent = state.fileName ? state.fileName.replace(/\.pdf$/i, "") : "Audiobook";
-  const mins = Math.max(1, Math.round(state.segments.length * 6 / state.rate));
-  bookMetaEl.textContent = `${state.numPages} pages · ${state.segments.length} sentences`;
+  const estMins = Math.max(1, Math.round(state.segments.length * 6 / state.rate));
+  const hr = Math.floor(estMins / 60);
+  const min = estMins % 60;
+  const timeStr = hr > 0 ? `${hr}h ${min}m` : `${min}m`;
+  bookMetaEl.textContent = `${state.numPages} pages · ${state.segments.length} sentences · ~${timeStr} at ${state.rate.toFixed(1)}×`;
 }
 
 /* ============================================================
@@ -580,7 +609,6 @@ async function handleFile(file) {
     state.fileName = file.name;
     state.segIndex = 0;
     await saveBook({
-      file: new Blob([buf], { type: "application/pdf" }),
       name: file.name,
       segments,
       numPages,
@@ -711,7 +739,13 @@ function wireEvents() {
 
   // Update timer label every second while active
   setInterval(() => {
-    if (state.sleepTimerEnd) renderTimerLabel();
+    if (state.sleepTimerEnd) {
+      renderTimerLabel();
+      // If the popup is open, update its title so it shows live remaining time.
+      if (!timerPopup.classList.contains("hidden")) {
+        openTimerPopup();
+      }
+    }
   }, 1000);
 
   // Persist position when the app is hidden or closed.

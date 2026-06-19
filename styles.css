@@ -131,7 +131,8 @@ body {
 #scrubber {
   -webkit-appearance: none; appearance: none;
   width: 100%; height: 6px; border-radius: 999px;
-  background: var(--panel-2); outline: none;
+  background: linear-gradient(90deg, var(--accent-2) var(--progress, 0%), var(--panel-2) var(--progress, 0%));
+  outline: none;
 }
 #scrubber::-webkit-slider-thumb {
   -webkit-appearance: none; appearance: none;
@@ -177,7 +178,7 @@ body {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
 }
 .chip:active { background: var(--panel-2); }
-.chip.wide { font-size: 15px; }
+.chip.wide { font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
 .setting-val { text-align: center; min-width: 84px; }
 .setting-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
 #rate-val { font-size: 16px; font-weight: 600; }
